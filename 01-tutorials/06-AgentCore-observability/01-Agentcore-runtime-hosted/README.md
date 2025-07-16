@@ -1,4 +1,4 @@
-# AgentCor Observability on Amazon CloudWatch for Non-Runtime Agents 
+# AgentCore Observability on Amazon CloudWatch for Bedrock AgentCore Agents 
 
 This repository contains examples to showcase AgentCore Observability for Strands Agent  hosted on Amazon Bedrock AgentCore Runtime using Amazon OpenTelemetry Python Instrumentation and Amazon CloudWatch. Observability helps developers trace, debug, and monitor agent performance in production through unified operational dashboards. With support for OpenTelemetry compatible telemetry and detailed visualizations of each step of the agent workflow, Amazon CloudWatch GenAI Observability enables developers to easily gain visibility into agent behavior and maintain quality standards at scale.
 
