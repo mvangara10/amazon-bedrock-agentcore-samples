@@ -12,7 +12,7 @@ This repository demonstrates how to implement AgentCore observability for Agents
 │   ├── README.md
 │   ├── requirements.txt
 │   └── runtime_with_strands_and_bedrock_models.ipynb
-├── 02-open-source-agents-3p/
+├── 02-Agent-not-hosted-on-runtime/
 │   ├── CrewAI/
 │   │   ├── .env.example
 │   │   ├── CrewAI_Observability.ipynb
