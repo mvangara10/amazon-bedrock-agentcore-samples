@@ -24,12 +24,12 @@ MODEL_ID = os.getenv("MODEL_ID", "global.anthropic.claude-haiku-4-5-20251001-v1:
 
 def get_ssm_parameter(name: str) -> str:
     """Get parameter from SSM."""
-    return boto3.client('ssm').get_parameter(Name=name)['Parameter']['Value']
+    return boto3.client("ssm").get_parameter(Name=name)["Parameter"]["Value"]
 
 
 def get_region() -> str:
     """Get AWS region."""
-    return boto3.Session().region_name or os.getenv('AWS_REGION', 'us-east-1')
+    return boto3.Session().region_name or os.getenv("AWS_REGION", "us-east-1")
 
 
 class OrchestratorAgent:
@@ -41,11 +41,13 @@ class OrchestratorAgent:
         self.region = get_region()
 
         # Create AgentCore client for calling sub-agents
-        self.agentcore_client = boto3.client('bedrock-agentcore', region_name=self.region)
+        self.agentcore_client = boto3.client(
+            "bedrock-agentcore", region_name=self.region
+        )
 
         # Load sub-agent ARNs from SSM
-        self.travel_arn = get_ssm_parameter('/agents/travel_agent_arn')
-        self.weather_arn = get_ssm_parameter('/agents/weather_agent_arn')
+        self.travel_arn = get_ssm_parameter("/agents/travel_agent_arn")
+        self.weather_arn = get_ssm_parameter("/agents/weather_agent_arn")
 
         logger.info(f"Initialized orchestrator with session: {session_id}")
         logger.info(f"Travel agent ARN: {self.travel_arn}")
@@ -60,7 +62,7 @@ class OrchestratorAgent:
             system_prompt="""You coordinate between specialized agents to help users.
 Use ask_travel_agent for destinations, attractions, and travel tips.
 Use ask_weather_agent for weather information.
-Always call the appropriate agent tools to get real information, then combine the responses into a helpful answer."""
+Always call the appropriate agent tools to get real information, then combine the responses into a helpful answer.""",
         )
 
     def _call_sub_agent(self, agent_arn: str, query: str) -> str:
@@ -80,17 +82,17 @@ Always call the appropriate agent tools to get real information, then combine th
             )
 
             # Read response - use 'response' key (not 'body')
-            response_body = response['response'].read().decode('utf-8')
+            response_body = response["response"].read().decode("utf-8")
             logger.info(f"Sub-agent response: {response_body[:200]}...")
 
             # Parse the response
             result = json.loads(response_body)
 
             # Handle wrapped response format
-            if isinstance(result, dict) and 'response' in result:
-                resp = result['response']
+            if isinstance(result, dict) and "response" in result:
+                resp = result["response"]
                 if isinstance(resp, list):
-                    return ' '.join(str(item) for item in resp)
+                    return " ".join(str(item) for item in resp)
                 return str(resp)
             return str(result)
 
@@ -103,6 +105,7 @@ Always call the appropriate agent tools to get real information, then combine th
         def ask_travel_agent(query: str) -> str:
             """Ask the travel agent for destinations, attractions, and travel tips."""
             return self._call_sub_agent(self.travel_arn, query)
+
         return ask_travel_agent
 
     def _make_weather_tool(self):
@@ -110,11 +113,12 @@ Always call the appropriate agent tools to get real information, then combine th
         def ask_weather_agent(query: str) -> str:
             """Ask the weather agent for current weather information."""
             return self._call_sub_agent(self.weather_arn, query)
+
         return ask_weather_agent
 
     def invoke(self, query: str) -> str:
         response = self.agent(query)
-        return response.message['content'][0]['text']
+        return response.message["content"][0]["text"]
 
 
 @app.entrypoint
@@ -123,7 +127,9 @@ def invoke(payload, context):
     prompt = payload.get("prompt", "")
 
     # Get session ID from AgentCore context or generate new one
-    session_id = context.session_id if hasattr(context, 'session_id') else str(uuid.uuid4())
+    session_id = (
+        context.session_id if hasattr(context, "session_id") else str(uuid.uuid4())
+    )
 
     # Set session ID in OpenTelemetry baggage for propagation
     baggage.set_baggage("session.id", session_id)
@@ -132,7 +138,9 @@ def invoke(payload, context):
     request_headers = context.request_headers or {}
     user_id = request_headers.get(
         "x-amzn-bedrock-agentcore-runtime-user-id",
-        request_headers.get("x-amzn-bedrock-agentcore-runtime-custom-actorid", "orchestrator-user")
+        request_headers.get(
+            "x-amzn-bedrock-agentcore-runtime-custom-actorid", "orchestrator-user"
+        ),
     )
 
     logger.info(f"Orchestrator received: {prompt}")

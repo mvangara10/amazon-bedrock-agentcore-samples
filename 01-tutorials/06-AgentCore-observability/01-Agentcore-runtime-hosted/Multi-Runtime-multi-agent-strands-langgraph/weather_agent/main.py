@@ -44,7 +44,11 @@ def create_agent():
     def chatbot(state: MessagesState):
         messages = state["messages"]
         if not messages or not isinstance(messages[0], SystemMessage):
-            messages = [SystemMessage(content="You are a weather assistant. Use the get_weather tool to look up weather information for locations.")] + messages
+            messages = [
+                SystemMessage(
+                    content="You are a weather assistant. Use the get_weather tool to look up weather information for locations."
+                )
+            ] + messages
         return {"messages": [llm_with_tools.invoke(messages)]}
 
     graph = StateGraph(MessagesState)

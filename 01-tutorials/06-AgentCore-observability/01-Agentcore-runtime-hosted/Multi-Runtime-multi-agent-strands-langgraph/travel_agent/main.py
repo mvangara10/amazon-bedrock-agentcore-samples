@@ -34,7 +34,7 @@ agent = Agent(
     name="Travel Agent",
     model=model,
     tools=[web_search],
-    system_prompt="You are a travel expert. Help users with destinations, attractions, and travel tips. Use the web_search tool to find current information."
+    system_prompt="You are a travel expert. Help users with destinations, attractions, and travel tips. Use the web_search tool to find current information.",
 )
 
 
@@ -43,11 +43,11 @@ def invoke(payload, context):
     """Main entrypoint for direct invocation."""
     prompt = payload.get("prompt", "")
 
-    session_id = getattr(context, 'session_id', 'no-session')
+    session_id = getattr(context, "session_id", "no-session")
     logger.info(f"Travel Agent received: {prompt}, session: {session_id}")
 
     response = agent(prompt)
-    return response.message['content'][0]['text']
+    return response.message["content"][0]["text"]
 
 
 if __name__ == "__main__":

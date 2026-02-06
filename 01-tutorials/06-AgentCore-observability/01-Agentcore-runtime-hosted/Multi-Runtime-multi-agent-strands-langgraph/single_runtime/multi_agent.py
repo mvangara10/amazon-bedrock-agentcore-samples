@@ -34,7 +34,9 @@ def get_weather(location: str) -> str:
         "tokyo": "68°F, Clear",
         "paris": "65°F, Overcast",
     }
-    return weather_data.get(location.lower(), f"Weather data for {location}: 70°F, Clear skies")
+    return weather_data.get(
+        location.lower(), f"Weather data for {location}: 70°F, Clear skies"
+    )
 
 
 # --- Sub-Agents ---
@@ -44,14 +46,14 @@ travel_agent = Agent(
     name="Travel Agent",
     model=model,
     tools=[web_search],
-    system_prompt="You are a travel expert. Use web_search to find travel information."
+    system_prompt="You are a travel expert. Use web_search to find travel information.",
 )
 
 weather_agent = Agent(
     name="Weather Agent",
     model=model,
     tools=[get_weather],
-    system_prompt="You are a weather assistant. Use get_weather to provide weather information."
+    system_prompt="You are a weather assistant. Use get_weather to provide weather information.",
 )
 
 
@@ -60,14 +62,14 @@ weather_agent = Agent(
 def ask_travel_agent(query: str) -> str:
     """Ask the travel agent for travel-related information."""
     response = travel_agent(query)
-    return response.message['content'][0]['text']
+    return response.message["content"][0]["text"]
 
 
 @tool
 def ask_weather_agent(query: str) -> str:
     """Ask the weather agent for weather information."""
     response = weather_agent(query)
-    return response.message['content'][0]['text']
+    return response.message["content"][0]["text"]
 
 
 # --- Orchestrator Agent ---
@@ -78,7 +80,7 @@ orchestrator = Agent(
     system_prompt="""You coordinate between specialized agents.
 Use ask_travel_agent for destinations, attractions, and travel tips.
 Use ask_weather_agent for weather information.
-Combine responses into a helpful answer."""
+Combine responses into a helpful answer.""",
 )
 
 
@@ -87,7 +89,7 @@ def invoke(payload, context):
     """Main entrypoint for the runtime."""
     prompt = payload.get("prompt", "")
     response = orchestrator(prompt)
-    return response.message['content'][0]['text']
+    return response.message["content"][0]["text"]
 
 
 if __name__ == "__main__":
