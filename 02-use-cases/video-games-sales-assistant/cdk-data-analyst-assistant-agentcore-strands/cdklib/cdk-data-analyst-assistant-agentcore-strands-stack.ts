@@ -8,7 +8,6 @@
  * - VPC with networking and security configuration
  * - IAM roles and permissions for AgentCore
  * - S3 bucket for data imports
- * - SSM parameters for configuration
  */
 
 import * as cdk from "aws-cdk-lib";
@@ -18,8 +17,8 @@ import * as rds from "aws-cdk-lib/aws-rds";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as path from 'path';
 import { aws_bedrockagentcore as bedrockagentcore } from 'aws-cdk-lib';
 
@@ -30,13 +29,6 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
     // ================================
     // STACK PARAMETERS
     // ================================
-
-    // Project identifier used in resource naming
-    const projectId = new cdk.CfnParameter(this, "ProjectId", {
-      type: "String",
-      description: "Project identifier used for naming resources",
-      default: "data-analyst-assistant-agentcore",
-    });
 
     // Name of the Aurora PostgreSQL database
     const databaseName = new cdk.CfnParameter(this, "DatabaseName", {
@@ -49,7 +41,7 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
     const bedrockModelId = new cdk.CfnParameter(this, "BedrockModelId", {
       type: "String",
       description: "The Bedrock model ID for the agent",
-      default: "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+      default: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     });
 
     // ================================
@@ -77,7 +69,6 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
 
     // VPC containing public and private subnets for secure database access
     const vpc = new ec2.Vpc(this, "AssistantVPC", {
-      vpcName: `${projectId.valueAsString}-vpc`,
       ipAddresses: ec2.IpAddresses.cidr("10.0.0.0/21"),
       maxAzs: 3,
       natGateways: 1,
@@ -132,7 +123,11 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
     const databaseUsername = "postgres";
     const secret = new rds.DatabaseSecret(this, "AssistantSecret", {
       username: databaseUsername,
-      secretName: `${projectId.valueAsString}-db-secret`,
+    });
+
+    // Read-only user secret for least-privilege database access
+    const readOnlySecret = new rds.DatabaseSecret(this, "ReadOnlySecret", {
+      username: "readonly_user",
     });
 
     // IAM role enabling Aurora S3 access for data imports
@@ -194,7 +189,6 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
 
     // IAM role with comprehensive permissions for Amazon Bedrock AgentCore
     const agentCoreRole = new iam.Role(this, 'AgentCoreMyRole', {
-      roleName: `AgentCoreExecution-${projectId.valueAsString}-${this.region}`,
       assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
       inlinePolicies: {
         'AgentCoreExecutionPolicy': new iam.PolicyDocument({
@@ -317,19 +311,8 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
                 'secretsmanager:GetSecretValue'
               ],
               resources: [
-                secret.secretArn
-              ]
-            }),
-            // New permissions for SSM Parameter Store
-            new iam.PolicyStatement({
-              sid: 'SSMParameterAccess',
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'ssm:GetParameter',
-                'ssm:GetParameters'
-              ],
-              resources: [
-                `arn:aws:ssm:${this.region}:${this.account}:parameter/${projectId.valueAsString}/*`
+                secret.secretArn,
+                readOnlySecret.secretArn
               ]
             }),
             // Permissions for DynamoDB
@@ -432,16 +415,25 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
     });
 
     // ================================
-    // BEDROCK AGENTCORE MEMORY
+    // BEDROCK AGENTCORE MEMORY (LTM)
     // ================================
 
-    // Short-term memory for AgentCore to maintain conversation context
+    // Long-term memory with semantic strategy for AgentCore
     const uniqueSuffix = cdk.Names.uniqueId(this).slice(-8).toLowerCase().replace(/[^a-z0-9]/g, '');
     const agentMemory = new bedrockagentcore.CfnMemory(this, 'AgentMemory', {
       name: `DataAnalystAssistantMemory_${uniqueSuffix}`,
-      eventExpiryDuration: 7, // Events expire after 7 days
+      eventExpiryDuration: 90, // Events expire after 90 days
       memoryExecutionRoleArn: agentCoreRole.roleArn,
-      description: 'Short-term memory for data analyst assistant conversations',
+      description: 'Long-term semantic memory for data analyst assistant conversations',
+      memoryStrategies: [
+        {
+          semanticMemoryStrategy: {
+            name: 'Facts',
+            description: 'Extracts and stores facts about video game sales data analysis conversations',
+            namespaces: ['/facts/{actorId}'],
+          },
+        },
+      ],
     });
 
     // ================================
@@ -462,9 +454,13 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
       roleArn: agentCoreRole.roleArn,
       description: 'Container runtime for video games sales data analyst assistant',
       environmentVariables: {
-        PROJECT_ID: projectId.valueAsString,
         MEMORY_ID: agentMemory.attrMemoryId,
         BEDROCK_MODEL_ID: bedrockModelId.valueAsString,
+        READONLY_SECRET_ARN: readOnlySecret.secretArn,
+        AURORA_RESOURCE_ARN: cluster.clusterArn,
+        DATABASE_NAME: databaseName.valueAsString,
+        QUESTION_ANSWERS_TABLE: rawQueryResults.tableName,
+        MAX_RESPONSE_SIZE_BYTES: '1048576',
       },
     });
     
@@ -485,104 +481,137 @@ export class CdkDataAnalystAssistantAgentcoreStrandsStack extends cdk.Stack {
     runtimeEndpoint.addDependency(agentRuntime);
 
     // ================================
-    // SSM PARAMETERS
+    // OBSERVABILITY - LOG DELIVERY
     // ================================
 
-    // SSM parameters containing AgentCore runtime configuration
-    new ssm.CfnParameter(this, 'SecretArnParam', {
-      name: `/${projectId.valueAsString}/SECRET_ARN`,
-      value: secret.secretArn,
-      description: 'Database secret ARN',
-      type: 'String'
+    // --- AgentCore Runtime Logs ---
+
+    // CloudWatch Log Group for AgentCore Runtime application logs
+    const runtimeLogGroup = new logs.LogGroup(this, 'RuntimeLogGroup', {
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/${agentRuntime.attrAgentRuntimeId}`,
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    new ssm.CfnParameter(this, 'AuroraResourceArnParam', {
-      name: `/${projectId.valueAsString}/AURORA_RESOURCE_ARN`,
-      value: cluster.clusterArn,
-      description: 'Aurora cluster ARN',
-      type: 'String'
+    // Delivery Source — Runtime application logs
+    const runtimeLogSource = new logs.CfnDeliverySource(this, 'RuntimeLogSource', {
+      name: `rt-${uniqueSuffix}-log-src`,
+      logType: 'APPLICATION_LOGS',
+      resourceArn: agentRuntime.attrAgentRuntimeArn,
+    });
+    runtimeLogSource.addDependency(agentRuntime);
+
+    // Delivery Destination — CloudWatch Logs for runtime
+    const runtimeLogDestination = new logs.CfnDeliveryDestination(this, 'RuntimeLogDestination', {
+      name: `rt-${uniqueSuffix}-log-dst`,
+      destinationResourceArn: runtimeLogGroup.logGroupArn,
     });
 
-    new ssm.CfnParameter(this, 'DatabaseNameParam', {
-      name: `/${projectId.valueAsString}/DATABASE_NAME`,
-      value: databaseName.valueAsString,
-      description: 'Database name',
-      type: 'String'
+    // Delivery — connects runtime source to destination
+    const runtimeLogDelivery = new logs.CfnDelivery(this, 'RuntimeLogDelivery', {
+      deliverySourceName: runtimeLogSource.ref,
+      deliveryDestinationArn: runtimeLogDestination.attrArn,
+    });
+    runtimeLogDelivery.addDependency(runtimeLogSource);
+    runtimeLogDelivery.addDependency(runtimeLogDestination);
+
+    // --- AgentCore Runtime Traces (X-Ray) ---
+
+    // Delivery Source — Runtime traces
+    const runtimeTracesSource = new logs.CfnDeliverySource(this, 'RuntimeTracesSource', {
+      name: `rt-${uniqueSuffix}-trc-src`,
+      logType: 'TRACES',
+      resourceArn: agentRuntime.attrAgentRuntimeArn,
+    });
+    runtimeTracesSource.addDependency(agentRuntime);
+
+    // Delivery Destination — X-Ray for traces
+    const runtimeTracesDestination = new logs.CfnDeliveryDestination(this, 'RuntimeTracesDestination', {
+      name: `rt-${uniqueSuffix}-trc-dst`,
+      deliveryDestinationType: 'XRAY',
     });
 
-    new ssm.CfnParameter(this, 'QuestionAnswersTableParam', {
-      name: `/${projectId.valueAsString}/QUESTION_ANSWERS_TABLE`,
-      value: rawQueryResults.tableName,
-      description: 'DynamoDB question answers table name',
-      type: 'String'
+    // Delivery — connects traces source to X-Ray destination
+    const runtimeTracesDelivery = new logs.CfnDelivery(this, 'RuntimeTracesDelivery', {
+      deliverySourceName: runtimeTracesSource.ref,
+      deliveryDestinationArn: runtimeTracesDestination.attrArn,
+    });
+    runtimeTracesDelivery.addDependency(runtimeTracesSource);
+    runtimeTracesDelivery.addDependency(runtimeTracesDestination);
+
+    // --- AgentCore Memory Logs ---
+
+    // CloudWatch Log Group for AgentCore Memory vended log delivery
+    const memoryLogGroup = new logs.LogGroup(this, 'MemoryLogGroup', {
+      logGroupName: `/aws/vendedlogs/bedrock-agentcore/memory/${agentMemory.attrMemoryId}`,
+      retention: logs.RetentionDays.TWO_WEEKS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    new ssm.CfnParameter(this, 'MaxResponseSizeBytesParam', {
-      name: `/${projectId.valueAsString}/MAX_RESPONSE_SIZE_BYTES`,
-      value: '1048576',
-      description: 'Maximum response size in bytes (1MB)',
-      type: 'String'
+    // Delivery Source — connects the Memory resource as a log source
+    const memoryLogSource = new logs.CfnDeliverySource(this, 'MemoryLogSource', {
+      name: `mem-${uniqueSuffix}-log-src`,
+      logType: 'APPLICATION_LOGS',
+      resourceArn: `arn:aws:bedrock-agentcore:${this.region}:${this.account}:memory/${agentMemory.attrMemoryId}`,
+    });
+    memoryLogSource.addDependency(agentMemory);
+
+    // Delivery Destination — CloudWatch Logs
+    const memoryLogDestination = new logs.CfnDeliveryDestination(this, 'MemoryLogDestination', {
+      name: `mem-${uniqueSuffix}-log-dst`,
+      destinationResourceArn: memoryLogGroup.logGroupArn,
     });
 
-    new ssm.CfnParameter(this, 'BedrockModelIdParam', {
-      name: `/${projectId.valueAsString}/BEDROCK_MODEL_ID`,
-      value: bedrockModelId.valueAsString,
-      description: 'Bedrock model ID for the agent',
-      type: 'String'
+    // Delivery — connects source to destination
+    const memoryLogDelivery = new logs.CfnDelivery(this, 'MemoryLogDelivery', {
+      deliverySourceName: memoryLogSource.ref,
+      deliveryDestinationArn: memoryLogDestination.attrArn,
     });
+    memoryLogDelivery.addDependency(memoryLogSource);
+    memoryLogDelivery.addDependency(memoryLogDestination);
 
     // ================================
     // CLOUDFORMATION OUTPUTS
     // ================================
 
-    // Aurora database cluster ARN
     new cdk.CfnOutput(this, "AuroraServerlessDBClusterARN", {
       value: cluster.clusterArn,
       description: "The ARN of the Aurora Serverless DB Cluster",
-      exportName: `${projectId.valueAsString}-AuroraServerlessDBClusterARN`,
     });
 
     new cdk.CfnOutput(this, "SecretARN", {
       value: secret.secretArn,
       description: "The ARN of the database credentials secret",
-      exportName: `${projectId.valueAsString}-SecretArn`,
+    });
+
+    new cdk.CfnOutput(this, "ReadOnlySecretARN", {
+      value: readOnlySecret.secretArn,
+      description: "The ARN of the read-only database user secret",
     });
 
     new cdk.CfnOutput(this, "DataSourceBucketName", {
       value: importBucket.bucketName,
-      description:
-        "S3 bucket for importing data into Aurora using aws_s3 extension",
-      exportName: `${projectId.valueAsString}-ImportBucketName`,
+      description: "S3 bucket for importing data into Aurora using aws_s3 extension",
     });
 
     new cdk.CfnOutput(this, "QuestionAnswersTableName", {
       value: rawQueryResults.tableName,
       description: "The name of the DynamoDB table for storing query results",
-      exportName: `${projectId.valueAsString}-QuestionAnswersTableName`,
     });
 
     new cdk.CfnOutput(this, "QuestionAnswersTableArn", {
       value: rawQueryResults.tableArn,
       description: "The ARN of the DynamoDB table for storing query results",
-      exportName: `${projectId.valueAsString}-QuestionAnswersTableArn`,
     });
 
     new cdk.CfnOutput(this, "AgentRuntimeArn", {
       value: agentRuntime.attrAgentRuntimeArn,
       description: "The ARN of the AgentCore runtime",
-      exportName: `${projectId.valueAsString}-AgentRuntimeArn`,
     });
-
-    new cdk.CfnOutput(this, "AgentEndpointName", {
-      value: runtimeEndpoint.name,
-      description: "The name of the AgentCore runtime endpoint",
-      exportName: `${projectId.valueAsString}-AgentEndpointName`,
-    });
-
+    
     new cdk.CfnOutput(this, "MemoryId", {
       value: agentMemory.attrMemoryId,
       description: "The ID of the AgentCore Memory",
-      exportName: `${projectId.valueAsString}-MemoryId`,
     });
 
   }
