@@ -7,7 +7,7 @@ Everything a user does goes through the npm CLI, which shells into this dispatch
     python3 -m migration_common load    [config arguments] --run-id <id> [--live true]
     python3 -m migration_common report  [config arguments] [--run-id <id>]
     python3 -m migration_common latest-run         [config arguments]
-    python3 -m migration_common target-config      [config arguments] --output-dir <dir>
+    python3 -m migration_common target-config      [config arguments] --output-dir <dir> [--create true]
     python3 -m migration_common account
     python3 -m migration_common engine-info        [--stack-name <name>] [--region <r>]
     python3 -m migration_common bucket-info        --bucket <name> [--region <r>]
@@ -96,13 +96,13 @@ def _source_prober(settings: dict[str, Any], purpose: str):
 
 
 def _target_prober(settings: dict[str, Any], purpose: str):
-    """Return a callable that proves a GA registry is listable with its credentials."""
+    """Return a callable that proves a target registry is listable with its credentials."""
     from .aws_auth import invoker_for_endpoint
-    from .registry_api import GaRegistryClient
+    from .registry_api import TargetRegistryClient
 
     def probe(endpoint: dict[str, Any]) -> None:
         invoker = invoker_for_endpoint(endpoint, run_id=None, purpose=purpose)
-        client = GaRegistryClient(invoker, settings["api"]["ga"], str(endpoint["region"]))
+        client = TargetRegistryClient(invoker, settings["api"]["target"], str(endpoint["region"]))
         client.list_records_page(registry_id=str(endpoint["registryId"]))
 
     return probe
@@ -145,6 +145,9 @@ def check(arguments: dict[str, str]) -> int:
         watermark_reader=watermark_reader,
         source_prober=source_prober,
         target_prober=target_prober,
+        # This entrypoint is only ever reached from the CLI on someone's machine, so the checks
+        # about that machine's own AWS configuration apply here and nowhere else.
+        workstation=True,
     )
     if flag(arguments, "JSON"):
         print(json.dumps({**report.as_dict(), "configurationSource": config_source}, indent=2))
@@ -374,7 +377,7 @@ def _render_report(
         return "\n".join(lines)
 
     latest = attempts[-1]
-    mode = "DRY RUN (nothing written to GA)" if latest.get("dryRun") else "LIVE"
+    mode = "DRY RUN (nothing written to the target registry)" if latest.get("dryRun") else "LIVE"
     lines.append(
         f"Load: {latest.get('status')} -- {mode}"
         + (f", attempt {len(attempts)} of {len(attempts)}" if len(attempts) > 1 else "")
@@ -389,11 +392,11 @@ def _render_report(
     if approval.get("recordsNeedingResubmission"):
         lines.append(
             f"  {approval['recordsNeedingResubmission']} record(s) were past DRAFT in Preview and "
-            "are DRAFT in GA -- submit them for approval when ready"
+            "are DRAFT in the target registry -- submit them for approval when ready"
         )
     # A record whose content loaded but whose status could not be reproduced is a successful record
     # with unfinished business, so it never reaches errorCount. Printing it is the difference
-    # between a run that looks clean and a run that is: the record exists in GA but sits in the
+    # between a run that looks clean and a run that is: the record exists in the target registry but sits in the
     # wrong status, which for anything past DRAFT means the data plane cannot see it.
     if approval.get("statusesNotApplied"):
         lines.append(
@@ -412,16 +415,16 @@ def _render_report(
 
 
 # --------------------------------------------------------------------------------------------
-# target-config -- derive the GA registry configuration to create
+# target-config -- derive the target registry configuration to create
 # --------------------------------------------------------------------------------------------
 
 
 def target_config(arguments: dict[str, str]) -> int:
-    """Write the GA ``CreateRegistry`` input derived from each source registry.
+    """Write the target registry ``CreateRegistry`` input derived from each source registry.
 
-    The registry itself is a decision (who may read it, what happens to submitted records), so this
-    prints the translated configuration and the one command that applies it rather than creating
-    anything.
+    Derives by default and prints the one command that applies the result, because the payload
+    decides who may read the registry and is worth a look before it exists. ``--create`` applies it
+    here instead: create, wait for ``READY``, and report the generated registry id.
     """
     from . import target_registry
     from .settings import resolve_configuration
@@ -439,6 +442,11 @@ def target_config(arguments: dict[str, str]) -> int:
 
     output_dir = optional_argument(arguments, "OUTPUT_DIR")
     entries = target_registry.derive_create_registry_inputs(settings, mappings, mapping_ids=requested)
+    create = flag(arguments, "CREATE")
+    if create:
+        # Before the loop below, so every entry already carries its registry id (or its
+        # createError) by the time that entry is reported and by the time --json is emitted.
+        target_registry.create_target_registries(settings, mappings, entries)
     failures = 0
     rendered_entries = []
     for entry in entries:
@@ -453,10 +461,21 @@ def target_config(arguments: dict[str, str]) -> int:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(body)
             entry["payloadPath"] = path
-            entry["command"] = target_registry.create_registry_command(entry, path)
+            # Kept even when --create applied the payload: it records exactly what was sent, which
+            # is what someone reviewing or reproducing the registry afterwards needs. The command
+            # is only offered when nothing was created, so there is one instruction on screen.
+            if not create:
+                entry["command"] = target_registry.create_registry_command(entry, path)
         else:
             print(f"# {entry['mappingId']}")
             print(body, end="")
+        if create:
+            if entry.get("createError"):
+                print(f"error: {entry['mappingId']}: {entry['createError']}", file=sys.stderr)
+                failures += 1
+            elif not flag(arguments, "JSON"):
+                status = entry.get("status") or "unknown"
+                print(f"Created target registry {entry.get('registryId')} for {entry['mappingId']} ({status})")
         # On stderr so it is seen even when stdout is the payload being redirected to a file, and
         # because these need answering before the payload is applied: a dropped authorizer field or
         # an audience still naming the Preview registry is an access-control decision, and this
@@ -466,7 +485,7 @@ def target_config(arguments: dict[str, str]) -> int:
         rendered_entries.append(entry)
 
     # Once, not per mapping, and only when a command was actually emitted: the command cannot run
-    # until the CLI has the GA model, and it is emitted to be copied.
+    # until the CLI has the target service model, and it is emitted to be copied.
     #
     # Skipped under --json, which means something is reading this output rather than a person: the
     # `init` wizard is the caller that does, and it prints the same note itself, in position, right
@@ -827,7 +846,7 @@ def _load(_arguments: dict[str, str], raw: list[str]) -> int:
 
 #: command name -> handler. A table rather than an ``if`` chain, and every name in :data:`COMMANDS`
 #: must appear here: the chain this replaces had no terminal ``else``, so its fall-through ran the
-#: *load* stage -- the one stage that writes to a customer's GA registry. A name added to
+#: *load* stage -- the one stage that writes to a customer's target registry. A name added to
 #: ``COMMANDS`` and forgotten in the chain would have silently started a load.
 #: ``test_engine_entrypoint`` asserts the two agree in both directions.
 _HANDLERS: dict[str, Any] = {

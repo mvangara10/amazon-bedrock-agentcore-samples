@@ -49,6 +49,21 @@ const REGISTRIES_DESCRIPTION =
   'Add a line to migrate another registry, delete a line to stop. Do not change a mapping ' +
   'mid-run: transform/load reconciles against the extract manifest and fails if a mapping differs.';
 
+// The Glue version the jobs run on. It is here rather than in configuration because it is not a
+// preference: 5.0 is the runtime whose interpreter is new enough for the SDK that carries the target
+// service model (see GLUE_SDK_MODULES), and the jobs are validated against it.
+const GLUE_VERSION = '5.0';
+
+// The SDK the jobs install at startup. `agent-registry-control` -- the target's service model --
+// first shipped in botocore 1.43.66, which requires Python 3.10 or newer, so the jobs use the Glue
+// runtime whose interpreter satisfies that. Both jobs are single-threaded boto3 scripts and never
+// create a SparkContext.
+//
+// Pinned exactly, not floored: an unpinned install resolves whatever is current when a migration
+// runs, so two runs of one cutover could stage and load with different SDKs. Raising this is a
+// deliberate edit, and `agent-registry-migration check` reports the version each side actually got.
+const GLUE_SDK_MODULES = 'boto3==1.43.66,botocore==1.43.66';
+
 export class MigrationEngineStack extends Stack {
   public readonly glueRole: iam.IRole;
   public readonly stagingBucket: s3.Bucket;
@@ -89,7 +104,7 @@ export class MigrationEngineStack extends Stack {
           // the run matters. Without this rule one small object per run accumulates forever.
           // The other two things under state/ are deliberately NOT covered, because both must
           // outlive every run: state/watermarks/ is the incremental-load position, and state/idmap/
-          // is which GA record each source record became -- expiring that would make the next run
+          // is which target record each source record became -- expiring that would make the next run
           // migrate every renamed record a second time.
           id: 'ExpireRunLocks',
           prefix: 'state/locks/',
@@ -210,7 +225,7 @@ export class MigrationEngineStack extends Stack {
       // What the deployment already knows, published so the commands do not have to be told it.
       // With this, `--staging-bucket` becomes optional: a job or CLI invocation that was given the
       // configuration prefix can look the bucket up here. Not part of the replay fingerprint,
-      // which covers `transform` + `api.ga` only.
+      // which covers `transform` + `api.target` only.
       engine: {
         stagingBucket: this.stagingBucket.bucketName,
         parameterPrefix: config.engine.parameterPrefix,
@@ -267,12 +282,17 @@ export class MigrationEngineStack extends Stack {
       '--STAGING_BUCKET': this.stagingBucket.bucketName,
       '--extra-py-files': commonLibraryUrl,
       '--enable-metrics': 'true',
-      // No --additional-python-modules. The clients talk to the control planes via modeled boto3
-      // operations, and both service models now come from whatever botocore the worker provides
-      // rather than from the wheel, so the worker's SDK has to carry agent-registry-control. A pip
-      // pin cannot supply it: the versions that ship it require Python >= 3.10, whereas Glue
-      // Python shell runs Python 3.9. Until Glue's runtime carries the model, the GA writer fails
-      // here with UnknownServiceError and the local (non-Glue) path is the one that works.
+      // The clients talk to the control planes via modeled boto3 operations, and both service models
+      // come from the worker's SDK rather than from this repository, so the worker has to carry
+      // agent-registry-control. No Glue image does: the Python shell runtime is boto3 1.21 and the
+      // Glue 5.0 Spark runtime is boto3 1.34, both older than the release that first shipped the
+      // model. Hence the pin -- see GLUE_SDK_MODULES for why these versions and not others.
+      '--additional-python-modules': GLUE_SDK_MODULES,
+      // Glue's own bookmarks are not how this tool resumes. An INCREMENTAL run reads the watermark
+      // it wrote to the staging bucket, which an operator can inspect, override with --changed-after
+      // and replay; a Glue bookmark is opaque state that would silently disagree with it. Set
+      // explicitly rather than left to the default so that is a decision on the record.
+      '--job-bookmark-option': 'job-bookmark-disable',
     };
 
     this.extractJob = new glue.CfnJob(this, 'ExtractJob', {
@@ -280,13 +300,17 @@ export class MigrationEngineStack extends Stack {
       role: this.glueRole.roleArn,
       description: 'Extract preview Agent Registry records into replayable S3 JSONL staging',
       command: {
-        name: 'pythonshell',
-        pythonVersion: '3.9',
+        name: 'glueetl',
+        pythonVersion: '3',
         scriptLocation: extractScriptUrl,
       },
+      glueVersion: GLUE_VERSION,
       defaultArguments: commonJobArguments,
       executionProperty: { maxConcurrentRuns: 1 },
-      maxCapacity: config.engine.glueMaxCapacity,
+      // workerType/numberOfWorkers rather than maxCapacity: the two are mutually exclusive on a
+      // glueetl job, and setting both is a deploy-time CloudFormation error.
+      workerType: config.engine.glueWorkerType,
+      numberOfWorkers: config.engine.glueNumberOfWorkers,
       maxRetries: 0,
       timeout: config.engine.glueTimeoutMinutes,
     });
@@ -294,15 +318,17 @@ export class MigrationEngineStack extends Stack {
     this.transformLoadJob = new glue.CfnJob(this, 'TransformLoadJob', {
       name: glueJobName(config.engine.stackName, config.engine.account, config.engine.region, 'transform-load'),
       role: this.glueRole.roleArn,
-      description: 'Transform preview records, idempotently load GA records, and emit migration reports',
+      description: 'Transform preview records, idempotently load target records, and emit migration reports',
       command: {
-        name: 'pythonshell',
-        pythonVersion: '3.9',
+        name: 'glueetl',
+        pythonVersion: '3',
         scriptLocation: transformLoadScriptUrl,
       },
+      glueVersion: GLUE_VERSION,
       defaultArguments: commonJobArguments,
       executionProperty: { maxConcurrentRuns: 1 },
-      maxCapacity: config.engine.glueMaxCapacity,
+      workerType: config.engine.glueWorkerType,
+      numberOfWorkers: config.engine.glueNumberOfWorkers,
       maxRetries: 0,
       timeout: config.engine.glueTimeoutMinutes,
     });
@@ -316,7 +342,7 @@ export class MigrationEngineStack extends Stack {
     }
 
     this.workflow = new glue.CfnWorkflow(this, 'MigrationWorkflow', {
-      description: 'Extract followed by transform/load for Agent Registry preview-to-GA migration',
+      description: 'Extract followed by transform/load for Agent Registry preview-to-new-version migration',
       defaultRunProperties: {
         configurationPrefix: config.engine.parameterPrefix,
         stagingBucket: this.stagingBucket.bucketName,
@@ -352,7 +378,7 @@ export class MigrationEngineStack extends Stack {
     });
     new CfnOutput(this, 'TransformLoadJobName', {
       value: this.transformLoadJob.ref,
-      description: 'Glue job that transforms staged records and loads them into the GA registries',
+      description: 'Glue job that transforms staged records and loads them into the target registries',
     });
     new CfnOutput(this, 'StartWorkflowCommand', {
       value: `aws glue start-workflow-run --name ${this.workflow.ref}`,
@@ -382,6 +408,31 @@ export class MigrationEngineStack extends Stack {
           'require creating an IAM role. The CLI deploy command does it instead, after every ' +
           'deploy and after any code change.',
       });
+    }
+
+    // Both rules check a Glue *security configuration*, which cdk-nag only evaluates for Spark jobs
+    // -- the Python shell jobs these replaced were never assessed against them. A security
+    // configuration requires a customer-managed KMS key, so honouring either would add a key (and
+    // its cost, rotation and grants) to every deployment.
+    for (const job of [this.extractJob, this.transformLoadJob]) {
+      NagSuppressions.addResourceSuppressions(job, [
+        {
+          id: 'AwsSolutions-GL1',
+          reason:
+            'Glue log output is metadata about the migration -- run ids, record ids, counts and ' +
+            'error messages -- and never record content, which travels between the control planes ' +
+            'and the staging bucket only. CloudWatch Logs encrypts it at rest with an AWS-owned key; ' +
+            'a security configuration would add a customer-managed KMS key without changing which ' +
+            'data is exposed.',
+        },
+        {
+          id: 'AwsSolutions-GL3',
+          reason:
+            'These jobs write no bookmark data to encrypt. Bookmarks are explicitly disabled in ' +
+            'defaultArguments: incremental runs are driven by the tool\'s own watermark in the ' +
+            'staging bucket, which is auditable and replayable, rather than by Glue state.',
+        },
+      ]);
     }
 
     NagSuppressions.addResourceSuppressions(this.stagingBucket, [
@@ -595,11 +646,11 @@ export class MigrationEngineStack extends Stack {
         }),
       );
     }
-    if (directResources.target.length > 0 && config.iam.gaWriteActions.length > 0) {
+    if (directResources.target.length > 0 && config.iam.targetWriteActions.length > 0) {
       this.glueRole.addToPrincipalPolicy(
         new iam.PolicyStatement({
-          sid: 'WriteSameAccountGaRegistries',
-          actions: config.iam.gaWriteActions,
+          sid: 'WriteSameAccountTargetRegistries',
+          actions: config.iam.targetWriteActions,
           resources: directResources.target,
         }),
       );
@@ -644,8 +695,8 @@ function publishedRunKnobs(load: LoadConfig): Record<keyof LoadConfig, Published
       name: 'dryRun',
       primary: true,
       comment: [
-        'Whether a run writes to GA is decided per run, not stored here:',
-        '  agent-registry-migration run          -- transform and report, writing NOTHING to GA',
+        'Whether a run writes to the target registry is decided per run, not stored here:',
+        '  agent-registry-migration run          -- transform and report, writing NOTHING to the target registry',
         '  agent-registry-migration run --live   -- create the records',
         'This value is only the default for a job started outside the CLI (the Glue console, say),',
         'where there is nobody to state the intent. Leaving it true keeps that path safe.',
@@ -673,10 +724,10 @@ function publishedRunKnobs(load: LoadConfig): Record<keyof LoadConfig, Published
       name: 'matchSourceStatus',
       primary: true,
       comment: [
-        'true (default) = put each migrated record into the status its Preview record holds. GA',
+        'true (default) = put each migrated record into the status its Preview record holds. The service',
         '       creates every record in DRAFT, and a DRAFT record is not returned by data-plane',
         '       search or the browsing APIs, so an approved record would arrive invisible.',
-        'false = leave everything in DRAFT for review inside GA before publishing.',
+        'false = leave everything in DRAFT for review inside the target registry before publishing.',
       ],
       value: String(load.matchSourceStatus),
     },
@@ -692,7 +743,7 @@ function publishedRunKnobs(load: LoadConfig): Record<keyof LoadConfig, Published
       name: 'loadConcurrency',
       comment: [
         'How many records the load stage processes at once (1-32). The per-record cost is waiting on',
-        'the GA API, so raising this shortens a run roughly proportionally. Use 1 to debug.',
+        'the new Registry API, so raising this shortens a run roughly proportionally. Use 1 to debug.',
       ],
       value: String(load.loadConcurrency),
     },
@@ -712,7 +763,7 @@ function publishedRunKnobs(load: LoadConfig): Record<keyof LoadConfig, Published
     allowReplayConfigurationDrift: {
       name: 'allowReplayConfigurationDrift',
       comment: [
-        'EXPERT: allow a DRY RUN of records extracted before the transform/GA settings changed.',
+        'EXPERT: allow a DRY RUN of records extracted before the transform/target settings changed.',
         'Live writes always require an exact match, whatever this says.',
       ],
       value: String(load.allowReplayConfigurationDrift),

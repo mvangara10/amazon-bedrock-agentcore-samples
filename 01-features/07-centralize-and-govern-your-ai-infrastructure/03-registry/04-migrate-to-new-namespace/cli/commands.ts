@@ -2,7 +2,7 @@
  * The things a user does. Each one is a whole step of the migration, not a piece of one.
  *
  * Every command resolves the same configuration file and the same staging location, so nothing has
- * to be re-supplied between them. Nothing reaches a GA registry unless `--live` says so, on either
+ * to be re-supplied between them. Nothing reaches a target registry unless `--live` says so, on either
  * `run` or `load`.
  */
 import * as fs from 'node:fs';
@@ -52,6 +52,8 @@ export interface Options {
   readonly offline: boolean;
   readonly deleteData: boolean;
   readonly keepReports: boolean;
+  /** `--create`: apply the derived target registry configuration instead of only printing it. */
+  readonly create: boolean;
   readonly runId?: string;
 }
 
@@ -121,7 +123,7 @@ function describeScope(options: Options): string {
 // init
 // --------------------------------------------------------------------------------------------
 
-const PLACEHOLDER_TARGET = '<ga-registry-id>';
+const PLACEHOLDER_TARGET = '<new-registry-id>';
 
 /** How many times a prompt re-asks before giving up, so a typo cannot loop forever unattended. */
 const MAX_PROMPT_ATTEMPTS = 3;
@@ -214,7 +216,7 @@ function explainRemoteAccounts(engineAccount: string, registries: RegistryMappin
   );
 }
 
-/** One entry from `target-config --json`: what the engine derived for a mapping. */
+/** One entry from `target-config --json`: what the engine derived for a mapping, and created. */
 interface DerivedTarget {
   readonly mappingId: string;
   readonly payloadPath?: string;
@@ -222,6 +224,12 @@ interface DerivedTarget {
   readonly error?: string;
   /** What about the derived payload needs a decision before it is applied. */
   readonly warnings?: readonly string[];
+  /** Set by `--create`: the registry the engine created, and the state it settled in. */
+  readonly registryId?: string;
+  readonly registryArn?: string;
+  readonly status?: string;
+  /** Why creating this one failed. A registry that exists but never settled reports both this and `registryId`. */
+  readonly createError?: string;
 }
 
 export async function init(options: Options): Promise<number> {
@@ -259,7 +267,7 @@ export async function init(options: Options): Promise<number> {
   } else {
     // Said here, before any question, because it changes what the rest of this wizard can do for you.
     //
-    // Without credentials the last step -- reading each Preview registry to derive the GA registry
+    // Without credentials the last step -- reading each Preview registry to derive the target registry
     // configuration -- fails. It used to fail exactly there, after every question had been answered,
     // with "Unable to locate credentials" and no indication that the shell was the problem rather
     // than the answers. The account id also cannot be filled in for you, which is why the first
@@ -267,7 +275,7 @@ export async function init(options: Options): Promise<number> {
     process.stdout.write(
       'No AWS credentials found in this shell.\n' +
         'The questions below still work and the configuration will still be written, but two things\n' +
-        'will not: your account id cannot be filled in for you, and the GA registry configuration\n' +
+        'will not: your account id cannot be filled in for you, and the target registry configuration\n' +
         'cannot be derived from your Preview registries at the end.\n' +
         'To get both, set up credentials (for example: aws sso login, or export AWS_PROFILE) and run\n' +
         'this again. Either way, "agent-registry-migration check" needs them before a migration.\n\n',
@@ -283,13 +291,13 @@ export async function init(options: Options): Promise<number> {
     const sourceAccount = await askAccount('  Account of the Preview registry', account);
     const sourceRegion = await askRegion('  Region of the Preview registry', identity?.region);
     const sourceRegistryId = await askRegistryId('  Preview registry id', { required: true });
-    // Both sides are asked separately because both can differ: a GA registry usually sits beside its
+    // Both sides are asked separately because both can differ: a target registry usually sits beside its
     // Preview registry, but consolidating estates across accounts or regions is a normal thing to
     // want, and the engine supports it. Defaults mean the common case is two Enter presses.
-    const targetAccount = await askAccount('  Account for the GA registry', sourceAccount);
-    const targetRegion = await askRegion('  Region for the GA registry', sourceRegion);
+    const targetAccount = await askAccount('  Account for the target registry', sourceAccount);
+    const targetRegion = await askRegion('  Region for the target registry', sourceRegion);
     const targetRegistryId = await askRegistryId(
-      '  GA registry id (leave empty and I will help you create it)',
+      '  Target registry id (leave empty and I will create the new-version registry for you)',
       { required: false },
     );
     registries.push({
@@ -328,34 +336,42 @@ export async function init(options: Options): Promise<number> {
 }
 
 /**
- * Derive each GA registry's configuration from its Preview registry, then take the id back.
+ * Derive each target registry's configuration from its Preview registry, create it, and record the id.
  *
- * Creating the registry stays the operator's call -- its authorizer decides who may read it -- but
- * working out the translated configuration does not, and neither does copying the resulting id into
- * the file by hand.
+ * Derive first and create second, in that order and with the payload on screen in between: the
+ * derived `discoveryConfiguration` decides who may read the registry, so it is shown before it is
+ * applied. What used to be manual either side of that -- running the create call, waiting for
+ * READY, copying the generated id into the configuration -- this does.
  */
 async function helpCreateTargetRegistries(
   configPath: string,
   config: MigrationFile,
   missing: RegistryMapping[],
+  options: { readonly create?: boolean } = {},
 ): Promise<void> {
-  const outputDir = path.resolve(path.dirname(configPath), 'ga-registry-payloads');
+  const outputDir = path.resolve(path.dirname(configPath), 'new-registry-payloads');
   process.stdout.write(
-    '\nYou still need a GA registry to migrate into. Its authorizer decides who may read it, so\n' +
-      'that is your call -- but the configuration can be derived from the Preview registry.\n\n',
+    '\nYou still need a target registry to migrate into. Its configuration is derived from the\n' +
+      'Preview registry, and I can create it for you once you have seen what it says.\n\n',
   );
   // Ask for JSON so the derived payload path comes back from the engine that wrote it, rather than
   // being reconstructed here from assumptions about the output directory.
-  const derived = runEngineJson<DerivedTarget[]>([
-    'target-config',
-    '--config-file',
-    configPath,
-    '--output-dir',
-    outputDir,
-    '--json',
-    '--mapping',
-    missing.map((mapping) => mapping.id).join(','),
-  ]);
+  const derived = runEngineJson<DerivedTarget[]>(
+    [
+      'target-config',
+      '--config-file',
+      configPath,
+      '--output-dir',
+      outputDir,
+      '--json',
+      '--mapping',
+      missing.map((mapping) => mapping.id).join(','),
+    ],
+    // One registry that cannot be read must not cost the others their configuration: the engine
+    // reports that mapping's error and still describes the rest, and the loop below says which one
+    // was left out.
+    { partial: true },
+  );
   if (!derived || derived.length === 0) {
     // Name the two things that actually cause this. The reason is printed above, by the engine, but
     // "Unable to locate credentials" on its own reads like a problem with the answers just given
@@ -365,23 +381,12 @@ async function helpCreateTargetRegistries(
         'things: no AWS credentials in this shell, or credentials without\n' +
         'bedrock-agentcore:GetRegistry on that registry.\n\n' +
         `Your answers are saved in ${configPath}, so nothing is lost. Either fix the credentials and\n` +
-        'run "agent-registry-migration target-config" to derive the configuration, or create the GA\n' +
+        'run "agent-registry-migration target-config" to derive the configuration, or create the target\n' +
         'registries yourself and put their ids into that file as target.registryId.\n',
     );
     return;
   }
-  // Deliberately no create-registry command and no model-install instructions.
-  //
-  // Both used to be printed here. The command needs the GA service model installed into
-  // ~/.aws/models, and that model is not distributed with this repository -- so the instruction was
-  // to copy a file that does not exist, and the command it enabled answered "Invalid choice:
-  // 'agent-registry-control'". Printing a command that cannot run, above an instruction that cannot
-  // be followed, is worse than printing neither: it reads as the supported path and sends people
-  // looking for a missing file.
-  //
-  // So creating the registry is stated as the separate, external step it actually is. What this
-  // tool can do is derive the equivalent GA configuration, which is what the payload below is for.
-  let recorded = false;
+  const pending: RegistryMapping[] = [];
   for (const mapping of missing) {
     const entry = derived.find((candidate) => candidate.mappingId === mapping.id);
     if (!entry?.payloadPath) {
@@ -389,37 +394,55 @@ async function helpCreateTargetRegistries(
       continue;
     }
     process.stdout.write(
-      `\nFor ${mapping.id}, create the GA registry yourself, then give its id below.\n` +
-        `  These are its settings, translated from your Preview registry:\n` +
-        `  ${entry.payloadPath}\n\n`,
+      `\nFor ${mapping.id}, these are the target registry's settings, translated from your Preview\n` +
+        `  registry:\n  ${entry.payloadPath}\n\n`,
     );
     // Printed with the payload rather than left to scroll past on stderr: "review this" is only
-    // actionable if what to look at comes with it. These are authorizer decisions -- a field GA
+    // actionable if what to look at comes with it. These are authorizer decisions -- a field the service
     // cannot accept, or an audience still naming the Preview registry.
     for (const warning of entry.warnings ?? []) {
       process.stdout.write(`  ! ${warning}\n\n`);
     }
-    process.stdout.write(
-      '  (creation is asynchronous; wait for the registry status to reach READY before loading)\n\n',
-    );
-    // Only offer to take the id back when there is a terminal to answer and something to fill in.
-    // Asking with no tty hangs forever, and a mapping that already has a real id has nothing to ask
-    // about -- its payload was printed so it can be compared against the registry that exists.
-    if (!isInteractive() || mapping.target.registryId !== PLACEHOLDER_TARGET) {
-      continue;
-    }
-    const registryId = await ask(`  GA registry id for ${mapping.id} (empty to add it later)`);
-    if (registryId) {
-      const stored = (config.registries ?? []).find((entry) => entry.id === mapping.id);
-      if (stored) {
-        stored.target.registryId = registryId;
-        recorded = true;
+    pending.push(mapping);
+  }
+
+  let recorded = false;
+  // --create says yes without asking, for a non-interactive or scripted run. Otherwise ask, because
+  // this is the first thing either command does that writes anything to an AWS account.
+  const create =
+    pending.length > 0 &&
+    (options.create === true ||
+      (isInteractive() && (await confirm(`Create ${pending.length === 1 ? 'it' : 'them'} now?`, true))));
+  if (create) {
+    recorded = await createTargetRegistries(configPath, config, pending, outputDir);
+  } else {
+    for (const mapping of pending) {
+      const entry = derived.find((candidate) => candidate.mappingId === mapping.id);
+      if (entry?.command) {
+        process.stdout.write(`\nTo create ${mapping.id} yourself:\n  ${entry.command}\n`);
+      }
+      process.stdout.write(
+        '  (creation is asynchronous; wait for the registry status to reach READY before loading)\n\n',
+      );
+      // Only offer to take the id back when there is a terminal to answer and something to fill in.
+      // Asking with no tty hangs forever, and a mapping that already has a real id has nothing to ask
+      // about -- its payload was printed so it can be compared against the registry that exists.
+      if (!isInteractive() || mapping.target.registryId !== PLACEHOLDER_TARGET) {
+        continue;
+      }
+      const registryId = await ask(`  Target registry id for ${mapping.id} (empty to add it later)`);
+      if (registryId) {
+        const stored = (config.registries ?? []).find((candidate) => candidate.id === mapping.id);
+        if (stored) {
+          stored.target.registryId = registryId;
+          recorded = true;
+        }
       }
     }
   }
-  // Only written when a registry id was actually collected. `target-config` calls this to *derive*
-  // configuration and is documented as creating nothing, so rewriting the file unconditionally --
-  // reformatting it, and touching its mtime -- was a side effect nobody asked for.
+  // Only written when a registry id was actually collected. Deriving alone changes nothing, so
+  // rewriting the file unconditionally -- reformatting it, and touching its mtime -- was a side
+  // effect nobody asked for.
   if (recorded) {
     writeConfig(configPath, config);
   }
@@ -429,9 +452,79 @@ async function helpCreateTargetRegistries(
   );
   process.stdout.write(
     stillMissing
-      ? `\nPut the remaining GA registry ids into ${configPath}, then run: agent-registry-migration check\n`
+      ? `\nPut the remaining target registry ids into ${configPath}, then run: agent-registry-migration check\n`
       : '\nNext: agent-registry-migration check\n',
   );
+}
+
+/**
+ * Create each pending target registry through the engine, and write the generated ids into the file.
+ *
+ * Returns whether the configuration now holds an id it did not before, so the caller writes the file
+ * once. A registry that was created but never reached READY records its id *and* reports the reason:
+ * the id is what stops the next attempt creating a second registry, so losing it is worse than
+ * storing one that is not ready yet.
+ */
+async function createTargetRegistries(
+  configPath: string,
+  config: MigrationFile,
+  pending: readonly RegistryMapping[],
+  outputDir: string,
+): Promise<boolean> {
+  process.stdout.write(
+    `\nCreating ${pending.length === 1 ? 'the target registry' : `${pending.length} target registries`}. ` +
+      'Each one provisions a workload identity, so this\ntakes a moment.\n',
+  );
+  const created = runEngineJson<DerivedTarget[]>(
+    [
+      'target-config',
+      '--config-file',
+      configPath,
+      '--output-dir',
+      outputDir,
+      '--json',
+      '--create',
+      '--mapping',
+      pending.map((mapping) => mapping.id).join(','),
+    ],
+    // A create that failed for one mapping still created the others, and their ids only exist in
+    // this output. Dropping it would leave real registries nobody can name, and the next run would
+    // create a second one for each.
+    { partial: true },
+  );
+  if (!created) {
+    process.stdout.write(
+      '\nNothing was created -- see the reason above. The derived payloads are still in\n' +
+        `${outputDir}, so you can create the registries from them and put their ids into\n` +
+        `${configPath} as target.registryId.\n`,
+    );
+    return false;
+  }
+  let recorded = false;
+  for (const mapping of pending) {
+    const entry = created.find((candidate) => candidate.mappingId === mapping.id);
+    if (entry?.registryId) {
+      const stored = (config.registries ?? []).find((candidate) => candidate.id === mapping.id);
+      if (stored) {
+        stored.target.registryId = entry.registryId;
+        recorded = true;
+      }
+      process.stdout.write(`  ${mapping.id}: ${entry.registryId}  (${entry.status ?? 'created'})\n`);
+    }
+    if (entry?.createError) {
+      process.stdout.write(`  ${mapping.id}: ${entry.createError}\n`);
+      // Named rather than left to be looked up: this is the failure people hit, it arrives as the
+      // registry's own statusReason ("Unable to create workload identity because access was
+      // denied"), and the missing permission is not the one the message appears to be about.
+      process.stdout.write(
+        '    Creating a registry needs agent-registry:CreateRegistry and the workload-identity\n' +
+          '    permissions listed in docs/iam.md.\n',
+      );
+    } else if (!entry?.registryId) {
+      process.stdout.write(`  ${mapping.id}: no registry was created; create it by hand.\n`);
+    }
+  }
+  return recorded;
 }
 
 // --------------------------------------------------------------------------------------------
@@ -469,7 +562,7 @@ export function check(options: Options): number {
     ...engineArgs(config, configPath, options.glue, options.local),
     ...scopeArgs(options),
     // check reports the run you are about to make, so the write decision has to reach it. Without
-    // this, `check --live` answered about a dry run -- "will NOT write to any GA registry" -- which
+    // this, `check --live` answered about a dry run -- "will NOT write to any target registry" -- which
     // is the one thing a pre-flight must never get backwards.
     ...(options.live ? ['--live', 'true'] : []),
   ];
@@ -499,9 +592,9 @@ function readinessProblem(config: MigrationFile, configPath: string): string | u
   );
   if (placeholders.length > 0) {
     return (
-      `${configPath} still has a placeholder GA registry id for: ` +
+      `${configPath} still has a placeholder target registry id for: ` +
       `${placeholders.map((mapping) => mapping.id).join(', ')}. ` +
-      'Create the GA registry, then put its id in as target.registryId. To see the settings to ' +
+      'Create the target registry, then put its id in as target.registryId. To see the settings to ' +
       'create it with, translated from the Preview registry, run ' +
       '"agent-registry-migration target-config".'
     );
@@ -518,14 +611,14 @@ function assertReady(config: MigrationFile, configPath: string): void {
 }
 
 /**
- * Derive the GA registry configuration for any mapping, at any time.
+ * Derive the target registry configuration for any mapping, at any time.
  *
  * `init` does this as part of first setup, but it is not a one-off need: adding a mapping later, or
  * rebuilding a registry, wants the same translation. Keeping it only inside `init` meant the answer
  * was reachable exactly once, and only by overwriting the configuration to get back to it.
  *
  * Reads the Preview registries and writes the payloads locally. It creates nothing: the authorizer
- * on a GA registry decides who may read it, so applying it stays the operator's call.
+ * on a target registry decides who may read it, so applying it stays the operator's call.
  */
 export async function targetConfig(options: Options): Promise<number> {
   const configPath = resolveConfigPath(options.config);
@@ -538,7 +631,9 @@ export async function targetConfig(options: Options): Promise<number> {
   );
   // With every target already filled in there is nothing to chase, but the translation is still
   // worth printing -- that is how you check an existing registry matches its source.
-  await helpCreateTargetRegistries(configPath, config, missing.length > 0 ? missing : config.registries ?? []);
+  await helpCreateTargetRegistries(configPath, config, missing.length > 0 ? missing : (config.registries ?? []), {
+    create: options.create,
+  });
   return 0;
 }
 
@@ -640,7 +735,7 @@ function loadStage(where: Context, options: Options, runId: string): number {
  * Read the preview registries into staging, and nothing else.
  *
  * The first half of a migration on its own, for the flow where reading and writing are separate
- * decisions taken at different times -- possibly by different people. It writes nothing to GA and
+ * decisions taken at different times -- possibly by different people. It writes nothing to the target registry and
  * cannot: no `--live` reaches it. What it hands back is the run id, which is what `load` and `report`
  * take, so the id comes from the command that produced it rather than from the tail of a longer one.
  */
@@ -648,7 +743,7 @@ export function extract(options: Options): number {
   const where = context(options);
   const runId = newRunId();
 
-  process.stdout.write('Reading the Preview registries. Nothing is written to GA.\n');
+  process.stdout.write('Reading the Preview registries. Nothing is written to the target registry.\n');
   header(where, options, { covering: describeScope(options), 'run id': runId });
 
   const checked = runChecks(where, options);
@@ -659,17 +754,17 @@ export function extract(options: Options): number {
 
   const extracted = extractStage(where, options, runId);
   if (extracted !== 0) {
-    process.stderr.write('\nExtraction failed. Nothing was written to GA.\n');
+    process.stderr.write('\nExtraction failed. Nothing was written to the target registry.\n');
     return extracted;
   }
 
   process.stdout.write('\n');
   runEngine(['report', ...where.shared, '--run-id', runId]);
   process.stdout.write(
-    `\nExtracted, and nothing has been written to GA. This run id is ${runId}\n\n` +
+    `\nExtracted, and nothing has been written to the target registry. This run id is ${runId}\n\n` +
       'Review it, then load it:\n' +
       `  agent-registry-migration load${whereFlag(options)} --dry-run   # transform and report, still writing nothing\n` +
-      `  agent-registry-migration load${whereFlag(options)} --live      # create the GA records\n\n` +
+      `  agent-registry-migration load${whereFlag(options)} --live      # create the target records\n\n` +
       `Both default to this extract, the most recent one. Pass --run-id ${runId} to be explicit,\n` +
       'or name an older run id to load that one instead.\n',
   );
@@ -693,8 +788,8 @@ export function load(options: Options): number {
 
   process.stdout.write(
     options.live
-      ? 'LIVE -- records will be created in the GA registries\n'
-      : 'Dry run -- nothing will be written to GA\n',
+      ? 'LIVE -- records will be created in the target registries\n'
+      : 'Dry run -- nothing will be written to the target registry\n',
   );
   header(where, options, {
     'run id': `${runId}${options.runId ? '' : ' (the most recent extract)'}`,
@@ -707,7 +802,7 @@ export function load(options: Options): number {
   }
 
   process.stdout.write(
-    options.live ? 'Creating the GA records...\n' : 'Transforming and reporting...\n',
+    options.live ? 'Creating the target records...\n' : 'Transforming and reporting...\n',
   );
   const loaded = loadStage(where, options, runId);
 
@@ -715,7 +810,7 @@ export function load(options: Options): number {
   runEngine(['report', ...where.shared, '--run-id', runId]);
   if (loaded === 0 && !options.live) {
     process.stdout.write(
-      '\nNothing was written to GA. When the report above looks right:\n' +
+      '\nNothing was written to the target registry. When the report above looks right:\n' +
         `  agent-registry-migration load${whereFlag(options)} --live --run-id ${runId}\n`,
     );
   }
@@ -739,8 +834,8 @@ export function run(options: Options): number {
 
   process.stdout.write(
     options.live
-      ? 'LIVE RUN -- records will be created in the GA registries\n'
-      : 'Dry run -- nothing will be written to GA\n',
+      ? 'LIVE RUN -- records will be created in the target registries\n'
+      : 'Dry run -- nothing will be written to the target registry\n',
   );
   header(where, options, {
     covering: describeScope(options),
@@ -764,13 +859,13 @@ export function run(options: Options): number {
     process.stdout.write('\nReading the Preview registries (read-only)...\n');
     const extracted = extractStage(where, options, runId);
     if (extracted !== 0) {
-      process.stderr.write('\nStopped during extraction. Nothing was written to GA.\n');
+      process.stderr.write('\nStopped during extraction. Nothing was written to the target registry.\n');
       return extracted;
     }
   }
 
   process.stdout.write(
-    options.live ? '\nCreating the GA records...\n' : '\nTransforming and reporting...\n',
+    options.live ? '\nCreating the target records...\n' : '\nTransforming and reporting...\n',
   );
   const loaded = loadStage(where, options, runId);
 
@@ -779,7 +874,7 @@ export function run(options: Options): number {
 
   if (loaded === 0 && !options.live) {
     process.stdout.write(
-      '\nNothing was written to GA. When the report above looks right, load the same records:\n' +
+      '\nNothing was written to the target registry. When the report above looks right, load the same records:\n' +
         `  agent-registry-migration load${whereFlag(options)} --live\n` +
         `\n(that loads this run, ${runId}, being the most recent extract. Pass --run-id to name it,\n` +
         ' or use `run --live --resume` to do the whole thing again in one command.)\n',

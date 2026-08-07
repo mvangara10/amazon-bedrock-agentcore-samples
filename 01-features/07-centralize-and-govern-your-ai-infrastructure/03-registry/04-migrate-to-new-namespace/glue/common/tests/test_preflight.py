@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -35,6 +36,71 @@ def settings(mode="FULL", changed_after=None, dry_run=True, fail_on_error=True):
 
 def statuses(results, name_contains):
     return [r.status for r in results if name_contains in r.name]
+
+
+class SdkModelChecks(unittest.TestCase):
+    """The check that stops a run whose SDK cannot build one of the two clients."""
+
+    def test_both_models_present_passes(self):
+        results = preflight.check_sdk_models(["s3", "bedrock-agentcore-control", "agent-registry-control"])
+        self.assertEqual(statuses(results, "sdk.serviceModels"), [preflight.PASS])
+
+    def test_missing_target_model_fails_and_names_the_version_that_has_it(self):
+        # The expensive case: extract succeeds against Preview, then the load dies on the first
+        # create. Half a working SDK has to fail as loudly as none of one.
+        results = preflight.check_sdk_models(["s3", "bedrock-agentcore-control"])
+        self.assertEqual(statuses(results, "sdk.serviceModels"), [preflight.FAIL])
+        self.assertIn("agent-registry-control", results[0].detail)
+        self.assertIn("write target records", results[0].detail)
+        self.assertIn(preflight.MINIMUM_BOTOCORE_VERSION, results[0].remedy)
+
+    def test_missing_preview_model_fails(self):
+        results = preflight.check_sdk_models(["s3", "agent-registry-control"])
+        self.assertEqual(statuses(results, "sdk.serviceModels"), [preflight.FAIL])
+        self.assertIn("bedrock-agentcore-control", results[0].detail)
+
+    def test_neither_model_reports_both(self):
+        results = preflight.check_sdk_models(["s3"])
+        self.assertEqual(statuses(results, "sdk.serviceModels"), [preflight.FAIL])
+        for service in preflight.REQUIRED_SERVICE_MODELS:
+            self.assertIn(service, results[0].detail)
+
+    def test_remedy_points_at_redeploying_the_jobs(self):
+        # On Glue the SDK arrives via --additional-python-modules, so the fix is a redeploy rather
+        # than a pip install the operator cannot perform on a worker.
+        results = preflight.check_sdk_models([])
+        self.assertIn("redeploy", results[0].remedy)
+
+
+class ShadowedTargetModel(unittest.TestCase):
+    """A model in ~/.aws/models wins over the SDK's own, which can take CreateRegistry away.
+
+    An interim `agent-registry-control` model installed during the preview carries the six record
+    operations and nothing else. Records still migrate with it -- the load only calls record
+    operations -- but creating a target registry stops working on an otherwise current SDK, and the
+    symptom ("Invalid choice: 'create-registry'", or a missing attribute) names the CLI or the SDK
+    rather than the file that caused it. Hence a warning that names the file.
+    """
+
+    def test_no_override_is_silent(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertEqual(preflight.check_shadowed_target_model(root), [])
+
+    def test_an_override_warns_and_names_the_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            override = os.path.join(root, "agent-registry-control")
+            os.makedirs(override)
+            results = preflight.check_shadowed_target_model(root)
+            self.assertEqual([r.status for r in results], [preflight.WARN])
+            self.assertIn(override, results[0].detail)
+            # It warns rather than fails, and says which half still works.
+            self.assertIn("record migration", results[0].detail)
+            self.assertIn("delete", results[0].remedy)
+
+    def test_the_jobs_never_run_it(self):
+        """A Glue worker has no ~/.aws/models, so reporting on one would describe the wrong machine."""
+        report = preflight.run_checks(settings(), [mapping()])
+        self.assertEqual([r for r in report.results if r.name == "sdk.shadowedTargetModel"], [])
 
 
 class MappingShapeChecks(unittest.TestCase):
@@ -218,7 +284,7 @@ class RegistryAccessChecks(unittest.TestCase):
         def broken(_endpoint):
             raise RuntimeError("ResourceNotFoundException: registry does not exist")
 
-        results = preflight.check_registry_access([mapping()], side="target", prober=broken, label="GA registry")
+        results = preflight.check_registry_access([mapping()], side="target", prober=broken, label="target registry")
         self.assertEqual([r.status for r in results], [preflight.FAIL])
         self.assertIn("registry id exists", results[0].remedy)
         self.assertIn("ResourceNotFound", results[0].detail)
