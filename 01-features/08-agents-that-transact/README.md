@@ -1,16 +1,21 @@
 # Agents That Transact — Amazon Bedrock AgentCore payments
 
-Amazon Bedrock AgentCore payments is a fully managed service that enables microtransaction payments in AI agents to access paid APIs, MCP servers, and content. AI agents increasingly handle complex tasks by calling APIs, accessing MCP servers, and interacting with other agents. As more services monetize through pay-per-use models, developers face challenges integrating payments into agentic workflows. Transactions are typically microtransactions (often under $1 or fractions of a cent), making traditional payment methods cost-prohibitive due to high minimum transaction fees. Meanwhile, content providers and publishers are introducing paywalls for AI agents to access their content. AgentCore payments provides a suite of developer-friendly capabilities that help you develop solutions to enable secure, instant payments to paid services using stablecoin, open protocols like x402 for cost-effective microtransactions, and configurable guardrails to help control agent spending. This can reduce developer effort from months to days.
+Amazon Bedrock AgentCore payments is a fully managed service that enables microtransaction payments in AI agents to access paid APIs, MCP servers, and content. AI agents increasingly handle complex tasks by calling APIs, accessing MCP servers, and interacting with other agents. As more services monetize through pay-per-use models, developers face challenges integrating payments into agentic workflows. Transactions are typically microtransactions (often under $1 or fractions of a cent), making traditional payment methods cost-prohibitive due to high minimum transaction fees. Meanwhile, content providers and publishers are introducing paywalls for AI agents to access their content. AgentCore payments provides a suite of developer-friendly capabilities that help you develop solutions to enable secure, instant payments to paid services using stablecoin, open protocols like x402 and MPP for cost-effective microtransactions, and configurable guardrails to help control agent spending. This can reduce developer effort from months to days.
 
-![AgentCore payments](00-getting-started/00-setup-agentcore-payments/images/main-image.png)
+![AgentCore payments](00-getting-started/00-setup-agentcore-payments/images/ga-main-image.png)
 
-> **Preview** — AgentCore payments is currently available as a preview. Features and APIs may change before general availability.
+
+**AgentCore payments is generally available** 
+
+Learn more about the latest features in this [blog post](https://aws.amazon.com/blogs/machine-learning/amazon-bedrock-agentcore-payments-is-now-generally-available-enabling-agents-to-transact-safely-and-autonomously-at-scale/). 
 
 > **Testnet only.** All samples use Base Sepolia (Ethereum) or Solana Devnet with free USDC from [faucet.circle.com](https://faucet.circle.com/). Testnet USDC has no real-world value.
 
 ## Start here
 
-New? Begin with [`00-getting-started/00-setup-agentcore-payments/`](00-getting-started/00-setup-agentcore-payments/) to create IAM roles and the payment stack that all other tutorials depend on.
+New? There are various ways to get started with [AgentCore payments](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/payments-getting-started.html).
+
+ Begin with [`00-getting-started/00-setup-agentcore-payments/`](00-getting-started/00-setup-agentcore-payments/) to create IAM roles and the payment stack that all other tutorials depend on.
 
 ## Top-level layout
 
@@ -43,6 +48,8 @@ Tutorials in `00-getting-started/` build on each other — start with Tutorial 0
 - [Coinbase announcement](https://www.coinbase.com/en-ca/blog/introducing-amazon-bedrock-agentcore-payments-powered-by-x402-and-coinbase)
 - [Stripe announcement](https://stripe.com/newsroom/news/aws-stripe-agentcore-privy)
 
+
+
 ## Prerequisites
 
 - Python 3.10+
@@ -70,3 +77,4 @@ python 00-getting-started/01-agents-payments-and-limits/langgraph_payment_agent.
 - All tutorials use **testnet only** (Base Sepolia / Solana Devnet). No real funds are involved.
 - Never commit `.env` files or private keys. Use AWS Secrets Manager for production credentials.
 - Follow IAM least-privilege: separate ControlPlaneRole, ManagementRole, and ProcessPaymentRole.
+- Follow [AWS shared responsibility model](https://aws.amazon.com/compliance/shared-responsibility-model/)

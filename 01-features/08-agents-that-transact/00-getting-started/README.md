@@ -1,7 +1,7 @@
 # AgentCore payments — Getting Started Tutorials
 
 Step-by-step Python tutorials for building payment-enabled AI agents with **Amazon Bedrock
-AgentCore payments** — x402 protocol orchestration, configurable spend limits, and third-party
+AgentCore payments** —  protocol orchestration, configurable spend limits, and third-party
 wallet integration (Coinbase CDP, Stripe/Privy).
 
 > **Testnet only.** All tutorials use Base Sepolia (Ethereum) or Solana Devnet with free USDC from
@@ -66,6 +66,8 @@ strip so you can see its inputs and outputs at a glance.
 | 05 | [`05-agent-with-browser-tool-pay-for-content/`](05-agent-with-browser-tool-pay-for-content/) | Pay 402 paywalls inside a browser session | SDK |
 | 06 | [`06-research-agent-with-payment-memory/`](06-research-agent-with-payment-memory/) | Add AgentCore Memory to skip redundant paid calls | SDK |
 | 07 | [`07-multi-agent-payment-orchestrator/`](07-multi-agent-payment-orchestrator/) | Multiple agents, separate wallets, per-agent budgets | CLI + SDK |
+
+MPP and Upto Tutorials are coming soon ! 
 
 ## Which tutorial do I need?
 
