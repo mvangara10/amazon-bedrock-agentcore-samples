@@ -34,12 +34,12 @@ Prerequisites:
 import os
 import sys
 
+import botocore.exceptions
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils import client_token, load_tutorial_env, print_summary, wait_for_status
-
 from bedrock_agentcore.payments import PaymentManager
+from utils import client_token, load_tutorial_env, print_summary, wait_for_status
 
 ENV_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 load_dotenv(ENV_FILE, override=True)
@@ -190,7 +190,7 @@ for label, inst_id, user_id in [
         print(f"  {label}: {amount:.2f} USDC on {chain}")
         if amount == 0:
             print("     Fund at: https://faucet.circle.com/")
-    except Exception as e:
+    except botocore.exceptions.ClientError as e:
         print(f"  {label}: balance check failed — {e}")
 
 # ── Section 5: Multi-Network Wallets (reference) ──────────────────────────────

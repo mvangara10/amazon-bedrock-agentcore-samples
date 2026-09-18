@@ -61,10 +61,12 @@ Role Separation
 
 import os
 import sys
+import time
 import uuid
 
 import boto3
 import botocore.exceptions
+from bedrock_agentcore.payments import PaymentManager
 from dotenv import load_dotenv
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -355,9 +357,6 @@ update_env_file(ENV_FILE, {"INSTRUMENT_ID": INSTRUMENT_ID, "WALLET_ADDRESS": WAL
 
 # ── Step 7a — Fetch WalletHub URL (Coinbase only) ─────────────────────────────
 if CREDENTIAL_PROVIDER_TYPE == "CoinbaseCDP":
-    import time
-    from bedrock_agentcore.payments import PaymentManager
-
     pm = PaymentManager(payment_manager_arn=MANAGER_ARN, region_name=AWS_REGION)
     redirect_url = None
     for attempt in range(6):
@@ -441,7 +440,7 @@ try:
     print(f"  Wallet balance: {amount:.2f} USDC on {chain}")
     if amount == 0:
         print("  ⚠️  Wallet has no USDC yet. Fund it via the faucet before running Tutorial 01.")
-except Exception as e:
+except botocore.exceptions.ClientError as e:
     print(f"  ⚠️  Balance check failed: {e}")
     print("  You can proceed to Step 8 — balance is verified through payment success in Tutorial 01.")
 
@@ -472,7 +471,7 @@ try:
     )
     print(f"  Logs: /aws/vendedlogs/bedrock-agentcore/{MANAGER_ID}")
     print("  View traces: CloudWatch console > X-Ray traces > Traces")
-except Exception as e:
+except botocore.exceptions.ClientError as e:
     print(f"  ⚠️  Observability setup failed: {e}")
     print("  This is non-blocking — tutorials will still work without observability.")
 
