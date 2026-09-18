@@ -351,17 +351,6 @@ INSTRUMENT_ID = resp["paymentInstrument"]["paymentInstrumentId"]
 WALLET_ADDRESS = resp["paymentInstrument"]["paymentInstrumentDetails"]["embeddedCryptoWallet"]["walletAddress"]
 print(f"\n  instrumentId:  {INSTRUMENT_ID}")
 print(f"  walletAddress: {WALLET_ADDRESS}")
-
-print("\nWaiting for ACTIVE...")
-wait_for_status(
-    dp_client.get_payment_instrument,
-    "ACTIVE",
-    paymentManagerArn=MANAGER_ARN,
-    paymentConnectorId=CONNECTOR_ID,
-    paymentInstrumentId=INSTRUMENT_ID,
-    userId=USER_ID,
-)
-print("  ✅ Instrument is ACTIVE")
 update_env_file(ENV_FILE, {"INSTRUMENT_ID": INSTRUMENT_ID, "WALLET_ADDRESS": WALLET_ADDRESS})
 
 # ── Step 7a — Fetch WalletHub URL (Coinbase only) ─────────────────────────────
@@ -424,7 +413,19 @@ else:
 
 input("  Press Enter when STEP 1 and STEP 2 are complete... ")
 
-# ── Step 7c — Verify Wallet Balance (Optional) ───────────────────────────────
+# ── Step 7c — Wait for ACTIVE (instrument is funded + delegated) ─────────────
+print("\nWaiting for ACTIVE...")
+wait_for_status(
+    dp_client.get_payment_instrument,
+    "ACTIVE",
+    paymentManagerArn=MANAGER_ARN,
+    paymentConnectorId=CONNECTOR_ID,
+    paymentInstrumentId=INSTRUMENT_ID,
+    userId=USER_ID,
+)
+print("  ✅ Instrument is ACTIVE (funded and delegated)")
+
+# ── Step 7d — Verify Wallet Balance (Optional) ───────────────────────────────
 chain = "BASE_SEPOLIA" if NETWORK == "ETHEREUM" else "SOLANA_DEVNET"
 try:
     balance_resp = dp_client.get_payment_instrument_balance(

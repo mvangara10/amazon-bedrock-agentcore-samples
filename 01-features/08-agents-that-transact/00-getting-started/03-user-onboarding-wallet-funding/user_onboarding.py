@@ -93,21 +93,12 @@ inst = manager.create_payment_instrument(
 NEW_INSTRUMENT_ID = inst["paymentInstrumentId"]
 NEW_WALLET = inst["paymentInstrumentDetails"]["embeddedCryptoWallet"]["walletAddress"]
 
-if inst.get("status") != "ACTIVE":
-    print("Waiting for instrument to become ACTIVE...")
-    wait_for_status(
-        manager.get_payment_instrument,
-        "ACTIVE",
-        user_id=NEW_USER_ID,
-        payment_instrument_id=NEW_INSTRUMENT_ID,
-    )
-
 print_summary(
     "New Instrument Created",
     instrument_id=NEW_INSTRUMENT_ID,
     wallet_address=NEW_WALLET,
     network=NETWORK,
-    status="ACTIVE",
+    status=inst.get("status", "unknown"),
 )
 
 redirect_url = inst["paymentInstrumentDetails"]["embeddedCryptoWallet"].get("redirectUrl")
@@ -156,6 +147,19 @@ print("    3. Confirm the wallet address matches the one printed in Section 1")
 print("    4. Choose 'Connect agent' → 'Give access'")
 print()
 print("  Without delegation: ProcessPayment fails with a signing error.")
+
+input("\nPress Enter after funding and delegating in Sections 2 and 3... ")
+
+# ── Section 3b: Wait for ACTIVE (instrument is funded + delegated) ───────────
+print("\n── Section 3b: Wait for ACTIVE ──")
+print("Waiting for instrument to become ACTIVE (funded and delegated)...")
+wait_for_status(
+    manager.get_payment_instrument,
+    "ACTIVE",
+    user_id=NEW_USER_ID,
+    payment_instrument_id=NEW_INSTRUMENT_ID,
+)
+print("  ✅ Instrument is ACTIVE (funded and delegated)")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PART 2 — Backend Operations
